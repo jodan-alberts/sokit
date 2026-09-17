@@ -21,6 +21,9 @@ class Action:
     terminal: bool = False
     escalate: bool = False       # a terminal action that hands off to a human
     allow_repeat: bool = False  # default: side-effecting tools are idempotent-guarded
+    generate: dict[str, Any] | None = None  # generate-then-validate (§10, pattern B):
+    # {"slot": "<args key for the draft>", "prompt": "<template>",
+    #  "validator": "<Noul instructions>", "validator_question": "draft_ok"}
 
 
 RouteResolver = Callable[[Evaluation, State], list[Action] | None]

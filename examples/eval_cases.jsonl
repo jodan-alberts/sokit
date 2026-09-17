@@ -1,0 +1,10 @@
+{"task": "Customer says: 'I want a refund for my subscription, please.'", "fields": {"account_id": "acct_123"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer says: 'I was charged twice on my invoice this month.'", "fields": {"account_id": "acct_123"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer says: 'I want my money back for this charge.'", "fields": {"account_id": "acct_123"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer asks: 'How do I change my account email address?'", "fields": {"account_id": "acct_123"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer says: 'Please close my account.'", "fields": {"account_id": "acct_999"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer says: 'Refund please, my plan is not refundable but I am asking anyway.'", "fields": {"account_id": "acct_999"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer asks: 'Is my invoice refundable under my current plan?'", "fields": {"account_id": "acct_123"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "success", "expect_run": "completed"}
+{"task": "Customer says: 'I want a refund.'", "fields": {"account_id": "acct_xyz"}, "expected": {"category": "billing", "refund_request": true}, "outcome": "failure", "expect_run": "completed"}
+{"task": "The app crashes on login with error 500.", "fields": {}, "expected": {}, "outcome": "failure", "expect_run": "escalated"}
+{"task": "Customer says: 'Refund my subscription.'", "fields": {}, "expected": {"category": "billing", "refund_request": true}, "outcome": "failure", "expect_run": "escalated"}

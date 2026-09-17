@@ -233,6 +233,21 @@ telemetry.attach_outcome(turn, "success" | "failure")   # ground truth, added of
 diagnostics so thresholds can be set from data, not vibes. Without outcome labels, the
 confidence channel is worthless.
 
+The labeled-eval loop lives in `harness/eval.py`: cases are JSONL
+(`{task, fields, expected: {question: value}, outcome}`, Score graded with a
+tolerance, Choice/Noul by exact match), `grade_case` scores the final
+evaluation per question, `run_suite(runner_factory, cases)` runs each case on
+a fresh runner and returns per-turn records with ground-truth outcomes
+attached (directly usable by the calibration functions), and
+`sweep_thresholds(records, error_budget)` grid-searches
+`ConfidenceGate(auto, escalate)` pairs and returns the highest-coverage pair
+under the error budget. `examples/eval_demo.py` runs the support-ticket mock
+policy over ~10 hand-labeled cases (`examples/eval_cases.jsonl`) and prints
+accuracy/coverage/ECE plus the tuner table — the contributors' regression
+gate (`python3 -m examples.eval_demo`, non-zero exit on mismatch). Its labels
+pin the mock's current behavior, quirks included; production labels must come
+from human ground truth.
+
 ---
 
 ## 9. Termination & safety
@@ -247,8 +262,17 @@ in `Runner`; the option-set rule is on you:
   turns, escalate.
 - **Idempotent tool execution** (enforced): a `(tool, args)` pair is never re-run with the same args
   unless explicitly allowed — prevents re-executing side effects in a stuck loop.
+  Only `ok=True` results enter the cache: a failed call may not have taken effect,
+  so failures stay re-runnable.
 - **`done` / `escalate` in every routing Choice** (policy-author rule, not enforced in code):
   there must always be a way out.
+- **Tool-error escalation** (enforced): `max_tool_errors` (default 3) consecutive
+  failed tool results escalate with a telemetry note. Tool implementations are
+  untrusted: exceptions degrade to `ERROR` results and hangs to `timeout`
+  results via `ToolRegistry(default_timeout=30.0, default_retries=0)` (per-tool
+  overrides on `FunctionTool`), with retries + exponential backoff on
+  infra failures only — an `ok=False` result is a model-visible outcome, not
+  retried. Idempotency-guard skips are neutral for the error counter.
 
 Low-confidence retry is allowed **only with augmented state** (more context/history).
 Re-asking the identical call is low-value for a low-variance model.
@@ -267,6 +291,19 @@ System One decides (what + confidence)  →  LLM produces text  →  System One 
 The LLM never makes the control-flow decision. The moment it does, the harness collapses
 into "just an LLM agent" and the System One model becomes redundant.
 
+Implemented in `harness/generate.py` (`TextGenerator` protocol, `MockGenerator`
+for offline use, `HttpGenerator` for OpenAI-compatible `/chat/completions` over
+stdlib urllib) plus the Runner's generate-then-validate path: an `Action` with
+`generate={"slot", "prompt", "validator", ...}` renders its prompt template,
+drafts via the generator (draft attached as an event), re-evaluates with a
+validator Noul gated by the same `ConfidenceGate` thresholds (scoped to the
+validator question), and only then executes the tool with `args[slot] = draft`.
+Generator failure, validator rejection, or low validator confidence all
+escalate with evidence — nothing proceeds silently. The draft only fills one
+args slot; the chosen action and routing never see generator output.
+`examples/draft_reply.py` proves the shape offline (canned draft, scripted
+validator).
+
 ---
 
 ## 11. API / schema-drift notes
@@ -274,7 +311,13 @@ into "just an LLM agent" and the System One model becomes redundant.
 - Endpoint: `POST https://api.typesafe.ai/v1/systemone`, body `{model, state, questions}`.
   Questions are keyed by name with `type` ∈ `{noul, choice, score}` (note: `noul`, not
   `boolean`).
-- **Pin the model version** (`jev-1.x.y`) rather than relying on the `jev-latest` alias.
+- **Pin the model version** (`jev-1.13.0` at time of writing) rather than relying on the `jev-latest` alias.
+- Observed response shape (verified live against `jev-1.13.0`): `{model, answers: {<name>:
+  {type, noul|choice|score, confidence?, probabilities?, legend? (score index→label), stats}},
+  usage: {input_tokens, output_tokens}, request_id, evaluation_time_ms}`.
+  `Noul` returns only `noul` (P(yes)) — no separate confidence field, so the harness
+  reuses it as the confidence. `TypeSafeClient._parse` ignores the extra fields;
+  log `request_id` + `evaluation_time_ms` for debugging.
 - **Version your question schemas** (`Policy.version`). The `instructions`/`criteria` text is
   the entire decision definition — treat it as a prompt to be versioned and evaluated;
   a poorly phrased criteria list is a silent accuracy loss.
@@ -286,9 +329,16 @@ into "just an LLM agent" and the System One model becomes redundant.
 
 - `SystemOneClient` — swap TypeSafe for a deterministic mock, or adapt a local
   decision model behind the same protocol.
-- `ContextProvider` — add `SqlProvider`, `WebSearchProvider`, vector-store RAG, etc.
-- `LongTermMemory` — swap the in-memory store for a vector DB.
-- `TextGenerator` (LLM bridge) — plug in for pattern B.
+- `ContextProvider` — `SqlProvider` (read-only SQLite over stdlib `sqlite3`:
+  `mode=ro` open + SELECT/WITH-only gate, `{{fields.x}}`/`{{task}}` templates
+  with separately-bound params, row-capped JSON-lines documents, `[sql error]`
+  degradation), `FilesProvider`, `HttpProvider`, `ClockProvider`,
+  `MemoryProvider`; `WebSearchProvider` remains a stub.
+- `LongTermMemory` — `InMemoryStore` for scratch use, `JsonlStore`
+  (append-per-add, crash-tolerant, same keyword ranking; single-writer, no
+  locking) for persistence; vector DBs remain a documented future.
+- `TextGenerator` (LLM bridge) — `MockGenerator` offline, `HttpGenerator`
+  (OpenAI-compatible, key from env) for pattern B.
 - `on_confirm` — plug in human-in-the-loop approval.
 
 See `README.md` for usage; `examples/support_agent.py` is a runnable end-to-end demo.

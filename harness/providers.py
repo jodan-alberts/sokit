@@ -76,14 +76,101 @@ class MemoryProvider:
 
 
 class SqlProvider:
-    """Stub: wire a DB driver here. The model can only trigger this provider
-    through pre-declared actions; credentials stay in the harness."""
-    def __init__(self, name: str = "sql", query: str = "") -> None:
-        self.name = name
+    """Read-only SQLite datasource (stdlib ``sqlite3``).
+
+    ``query`` supports the tool-arg template style (``{{fields.x}}`` /
+    ``{{task}}``); ``params`` are bound separately via DB-API placeholders
+    and never interpolated. Read-only is enforced two ways: the file is
+    opened with ``mode=ro`` and only ``SELECT``/``WITH`` statement prefixes
+    are accepted. Output is one Document with rows as compact JSON lines,
+    truncated at ``max_rows`` with a truncation marker. DB errors degrade to
+    a ``[sql error: …]`` document — providers must never crash the loop.
+
+    Pass ``connection`` (e.g. a shared ``:memory:`` connection) instead of a
+    file path for tests; otherwise ``db_path`` is opened per gather.
+    """
+    def __init__(
+        self,
+        db_path: str = "",
+        query: str = "",
+        params: list | tuple | None = None,
+        max_rows: int = 50,
+        read_only: bool = True,
+        name: str = "sql",
+        connection: Any = None,
+    ) -> None:
+        self.db_path = db_path
         self.query = query
+        self.params = list(params) if params is not None else []
+        self.max_rows = max_rows
+        self.read_only = read_only
+        self.name = name
+        self.connection = connection
 
     def gather(self, state: State) -> list[Document]:
-        raise NotImplementedError("wire a database connection here")
+        import re as _re
+        import sqlite3 as _sqlite3
+
+        rendered = self._render(self.query, state)
+        first = _re.sub(r"^\s*(--[^\n]*\n|\s|/\*.*?\*/)*", "", rendered,
+                        flags=_re.DOTALL).strip().upper()
+        if not (first.startswith("SELECT") or first.startswith("WITH")):
+            return [Document(self.name, "[sql error: only SELECT/WITH queries are allowed]")]
+        try:
+            if self.connection is not None:
+                cursor = self.connection.execute(rendered, self.params)
+                rows = cursor.fetchall()
+                columns = [str(d[0]) for d in (cursor.description or [])]
+                return [self._format(rows, columns)]
+            if self.db_path == ":memory:":
+                raise _sqlite3.OperationalError("no shared connection for :memory:")
+            if self.read_only:
+                uri = f"file:{self.db_path}?mode=ro"
+                conn = _sqlite3.connect(uri, uri=True)
+            else:
+                conn = _sqlite3.connect(self.db_path)
+            try:
+                conn.row_factory = _sqlite3.Row
+                cursor = conn.execute(rendered, self.params)
+                rows = cursor.fetchall()
+                columns = [str(d[0]) for d in (cursor.description or [])]
+                return [self._format(rows, columns)]
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 — graceful degradation, like FilesProvider
+            return [Document(self.name, f"[sql error: {exc}]")]
+
+    def _format(self, rows: list, columns: list[str]) -> Document:
+        import json as _json
+
+        total = len(rows)
+        lines = []
+        for row in rows[: self.max_rows]:
+            if isinstance(row, dict):
+                mapping = row
+            elif hasattr(row, "keys"):  # sqlite3.Row
+                mapping = {col: row[col] for col in columns}
+            else:  # plain tuple from a cursor without row_factory
+                mapping = {col: row[i] for i, col in enumerate(columns)}
+            lines.append(_json.dumps(mapping, separators=(",", ":"), default=str))
+        text = "\n".join(lines)
+        if total > self.max_rows:
+            marker = f"…(truncated, {total} total)"
+            text = (text + "\n" + marker) if text else marker
+        return Document(self.name, text)
+
+    @staticmethod
+    def _render(template: str, state: State) -> str:
+        def repl(match: Any) -> str:
+            key = match.group(1).strip()
+            if key == "task":
+                return state.task
+            if key.startswith("fields."):
+                return str(state.fields.get(key.split(".", 1)[1], ""))
+            return match.group(0)
+
+        import re as _re
+        return _re.sub(r"\{\{([^{}]+)\}\}", repl, template)
 
 
 class WebSearchProvider:

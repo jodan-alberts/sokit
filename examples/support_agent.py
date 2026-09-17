@@ -13,7 +13,9 @@ Run with:  python -m examples.support_agent
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,11 +37,50 @@ from harness import (
 )
 
 # --- external datasources -----------------------------------------------------
+# Seed data; materialized into a small SQLite file at startup so the account
+# lookup exercises the real SqlProvider path (still hermetic: temp file, mock
+# client, no network).
 ACCOUNTS = {
     "acct_123": {"plan": "pro", "refundable": True},
     "acct_999": {"plan": "basic", "refundable": False},
 }
 KB = "Knowledge base: refunds are allowed for 'pro' plans within 30 days."
+
+_DB_PATH = os.path.join(tempfile.gettempdir(), "sokit_support_accounts.db")
+
+
+def init_account_db(path: str = _DB_PATH) -> str:
+    """Create (or recreate) the demo account database from ACCOUNTS."""
+    if os.path.exists(path):
+        os.remove(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE accounts (id TEXT PRIMARY KEY, plan TEXT, refundable INTEGER)")
+        conn.executemany(
+            "INSERT INTO accounts (id, plan, refundable) VALUES (?, ?, ?)",
+            [(aid, a["plan"], int(a["refundable"])) for aid, a in ACCOUNTS.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def get_account(account_id: str) -> dict | None:
+    """Read one account from the SQLite file (falls back to ACCOUNTS pre-init)."""
+    if os.path.exists(_DB_PATH):
+        conn = sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT plan, refundable FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {"plan": row["plan"], "refundable": bool(row["refundable"])}
+    return ACCOUNTS.get(account_id)
 
 
 def kb_provider(state):
@@ -50,7 +91,7 @@ def kb_provider(state):
 # --- tools --------------------------------------------------------------------
 def lookup_account(args, context):
     account_id = args.get("account_id", "")
-    acct = ACCOUNTS.get(account_id)
+    acct = get_account(account_id)
     if acct is None:
         return ToolResult("lookup_account", False, f"account {account_id} not found")
     return ToolResult(
@@ -61,7 +102,7 @@ def lookup_account(args, context):
 
 def issue_refund(args, context):
     account_id = args.get("account_id", "")
-    acct = ACCOUNTS.get(account_id)
+    acct = get_account(account_id)
     if acct is None:
         return ToolResult("refund", False, f"account {account_id} not found")
     if not acct["refundable"]:
@@ -120,8 +161,9 @@ def resolve(evaluation, state):
     return [Action("escalate", terminal=True)]
 
 
-def main():
-    client = MockClient(rules={
+def mock_rules():
+    """The deterministic MockClient rules (shared with examples/eval_demo.py)."""
+    return {
         "category": {
             "billing": ["refund", "charge", "invoice", "billing"],
             "account": ["account"],
@@ -130,7 +172,12 @@ def main():
         "refund_request": {"yes": ["refund", "money back"], "no": []},
         "refundable": {"yes": ["refundable=true"], "no": ["refundable=false"]},
         "next_action": next_action_rule,
-    })
+    }
+
+
+def main():
+    init_account_db()
+    client = MockClient(rules=mock_rules())
 
     tools = (
         ToolRegistry()

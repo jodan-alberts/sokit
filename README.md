@@ -16,18 +16,23 @@ harness/
   decisions.py   # Question, Decision, Evaluation (Choice / Score / Noul)
   state.py       # State (working memory) + Event
   context.py     # StateBuilder + ContextProvider protocol + Document
-  providers.py   # Files/HTTP/clock/memory providers (SQL & web-search stubs)
-  policy.py      # Policy, Action, route helpers
-  tools.py       # ToolRegistry, FunctionTool, argument templating
+  providers.py   # Files/HTTP/clock/memory/SQL providers (web-search stub)
+  policy.py      # Policy, Action (incl. generate-then-validate), route helpers
+  tools.py       # ToolRegistry (timeout/retry/error capture, idempotency), FunctionTool
   confidence.py  # ConfidenceGate (act/confirm/escalate)
-  memory.py      # LongTermMemory protocol + in-memory store
+  memory.py      # LongTermMemory protocol + InMemoryStore + JsonlStore
   telemetry.py   # TurnRecord / Telemetry (decision + outcome logging)
   calibration.py # expected calibration error over labeled runs
+  eval.py        # labeled-eval loop: grade_case, run_suite, sweep_thresholds
+  generate.py    # TextGenerator bridge (Mock + OpenAI-compatible HTTP)
   runner.py      # the loop: budgets, no-progress detection, escalation
 examples/
-  support_agent.py   # end-to-end demo
+  support_agent.py   # end-to-end demo (SQLite-backed account lookup)
+  incident_agent.py  # flat-vs-harness incident demo
+  draft_reply.py     # generate-then-validate reply drafting (mock path)
+  eval_demo.py + eval_cases.jsonl  # labeled-eval regression gate
 tests/
-  test_runner.py
+  test_runner.py test_tools.py test_datasources.py test_eval.py test_generate.py
 ```
 
 ## Quick start
@@ -39,8 +44,14 @@ No install needed for the demo/tests (stdlib only):
 python3 -m examples.incident_agent
 python3 -m examples.incident_agent --mock   # deterministic offline demo
 
-# support-ticket demo (MockClient)
+# support-ticket demo (MockClient, SQLite-backed accounts)
 python3 -m examples.support_agent
+
+# generate-then-validate drafting demo (mock generator + scripted validator)
+python3 -m examples.draft_reply
+
+# labeled-eval regression gate (accuracy/ECE + threshold tuner table)
+python3 -m examples.eval_demo
 
 # run the tests
 python3 -m unittest discover -s tests -v
@@ -58,7 +69,7 @@ pip install -e ".[typesafe]" # + requests for the real TypeSafe API
 ```python
 from harness import TypeSafeClient, Runner, Policy, ToolRegistry, StateBuilder, ConfidenceGate
 
-client = TypeSafeClient()  # default model is jev-latest; pin a released version once available
+client = TypeSafeClient(model="jev-1.13.0")  # pin a released version, not the jev-latest alias
 runner = Runner(
     client=client,
     policy=Policy(questions=... , resolvers=[...]),
@@ -84,6 +95,42 @@ ConfidenceGate(auto=0.8, escalate=0.5, questions=["next_action"])
 
 Speculative/informational questions (e.g. a root-cause `hypothesis`) are often
 *honestly* low-confidence early on and should not force an escalation.
+
+### Tool hardening
+
+Tools are untrusted: exceptions degrade to `ERROR` results and hangs to
+`timeout` results instead of killing the loop, with retries + exponential
+backoff on infra failures only (`ToolRegistry(default_timeout=30.0,
+default_retries=0)`, per-tool overrides on `FunctionTool`). Only `ok=True`
+results enter the idempotency cache, so failed calls stay re-runnable; `N`
+consecutive failures (`Runner(..., max_tool_errors=3)`) escalate.
+
+### Datasources & memory
+
+`SqlProvider` is a read-only SQLite datasource (stdlib `sqlite3`, `mode=ro` +
+SELECT/WITH-only, separately-bound params); `JsonlStore` is crash-tolerant
+file-backed long-term memory (single-writer). The support demo seeds its
+accounts into a temp SQLite file at startup.
+
+### Labeled eval
+
+`harness/eval.py` grades labeled JSONL cases, attaches outcomes to telemetry,
+and tunes gate thresholds under an error budget — see `DESIGN.md` §8 and
+`python3 -m examples.eval_demo`.
+
+### LLM bridge (pattern B)
+
+System One decides, an LLM drafts, System One validates before execution:
+
+```python
+Action("draft", tool="send_reply", args={"account_id": "{{fields.account_id}}"},
+       generate={"slot": "message",
+                 "prompt": "Draft a refund reply for {{fields.account_id}}: {{task}}",
+                 "validator": "Is this draft safe, correct, and on-policy?"})
+runner = Runner(..., generator=MockGenerator(template="..."))  # or HttpGenerator(...)
+```
+
+See `python3 -m examples.draft_reply` and `DESIGN.md` §10.
 
 ## Minimal example
 
