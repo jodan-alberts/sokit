@@ -1,6 +1,7 @@
 """SOKIT interactive CLI — demo, play with, and test the agents.
 
     python3 -m examples.cli list
+    python3 -m examples.cli inspect support --mock
     python3 -m examples.cli run support "I want a refund" --fields '{"account_id": "acct_123"}'
     python3 -m examples.cli repl draft
 
@@ -22,6 +23,10 @@ from examples.tui import (
     Spinner,
     fmt_action,
     fmt_decision,
+    fmt_distribution,
+    fmt_gate_detail,
+    fmt_margin,
+    fmt_question,
     gate_chip,
     outcome_banner,
     panel,
@@ -115,6 +120,50 @@ AGENTS = {
 }
 
 
+def model_label(client, mode: str) -> str:
+    """Human-readable model identity for headers (mock vs live TypeSafe)."""
+    if mode == "mock":
+        return "mock (deterministic, offline)"
+    model = getattr(client, "model", "jev-latest")
+    endpoint = getattr(client, "endpoint", "")
+    return f"live TypeSafe · {model} · {endpoint}" if endpoint else f"live TypeSafe · {model}"
+
+
+def _tool_names(runner) -> list[str]:
+    registry = getattr(runner, "tools", None)
+    tools = getattr(registry, "_tools", None)
+    if isinstance(tools, dict):
+        return sorted(tools)
+    return []
+
+
+def agent_card_lines(agent: str, runner=None, mode: str = "mock") -> list[str]:
+    """Inspect lines for an agent: questions, tools, gate, policy version."""
+    info = AGENTS[agent]
+    runner = runner  # built by caller when available; else introspect lazily
+    lines = [info["description"], ""]
+    if runner is not None:
+        policy = runner.policy
+        gate = runner.confidence_gate
+        lines.append(f"policy v{getattr(policy, 'version', '?')} · "
+                     f"model: {model_label(getattr(runner, 'client', None), mode)}")
+        scoped = f"scoped to [{', '.join(gate.questions)}]" if gate.questions else "all questions"
+        lines.append(f"gate: auto={gate.auto:g} escalate={gate.escalate:g} ({scoped})")
+        lines.append(f"tools: {', '.join(_tool_names(runner)) or '—'}")
+        lines.append(f"max_turns={runner.max_turns} · "
+                     f"providers={len(getattr(runner.state_builder, 'providers', []))}")
+        lines.append("")
+        lines.append("questions:")
+        for name, q in policy.questions.items():
+            qtype = getattr(getattr(q, 'type', '?'), 'value', str(getattr(q, 'type', '?')))
+            instr = getattr(q, 'instructions', '')
+            opts = list(getattr(q, 'options', None) or getattr(q, 'levels', None) or [])
+            lines.append(f"  · {name} ({qtype}): {instr}")
+            if opts:
+                lines.append(f"    options: {', '.join(opts)}")
+    return lines
+
+
 def select_client(agent: str, mock: bool, real: bool) -> tuple[object, str]:
     """Return (client, mode) where mode is 'mock' or 'real'."""
     from harness.client import _read_env_file
@@ -177,12 +226,34 @@ def print_guide(agent: str) -> None:
     print(panel(f"{agent} — guide", [info["description"], "", *info["guide"]]))
 
 
-def print_turn(turn: int, evaluation, gate, actions, trace: bool = True) -> None:
+def print_turn(turn: int, evaluation, gate, actions, trace: bool = True,
+               questions: dict | None = None, gate_obj=None,
+               verbose: bool = False) -> None:
+    """Render one turn: decision + full distribution + gate reasoning.
+
+    ``trace=False`` stays silent (for --quiet). The default trace shows the
+    top-3 probability mass per question so the runner-up is visible; ``verbose``
+    adds question definitions (type + instructions + options).
+    """
     if not trace:
         return
     print(f"\n{style(f'── turn {turn}', bold=True)} {gate_chip(gate.value)}")
     for name, d in evaluation.decisions.items():
-        print(fmt_decision(name, d.value, d.confidence))
+        if verbose and questions is not None and name in questions:
+            print(fmt_question(name, questions[name]))
+        print(fmt_decision(name, d.value, d.confidence), end="")
+        margin = fmt_margin(getattr(d, "probabilities", None))
+        print(f"  {margin}" if margin else "")
+        dist = fmt_distribution(getattr(d, "probabilities", None))
+        if dist:
+            print(dist)
+    if gate_obj is not None:
+        scoped = getattr(gate_obj, "questions", None)
+        confs = {n: dd.confidence for n, dd in evaluation.decisions.items()
+                 if not scoped or n in scoped}
+        print(fmt_gate_detail(gate.value, confs, auto=gate_obj.auto,
+                              escalate=gate_obj.escalate,
+                              gated_questions=gate_obj.questions))
     for action in actions:
         print(fmt_action(action))
 
@@ -199,16 +270,54 @@ def print_events(result, trace: bool = True) -> None:
               f"{style(e.content, fg=color)}")
 
 
+def print_summary(agent: str, result, runner, mode: str, trace: bool = True) -> None:
+    """End-of-run model summary: outcome, turns, tool calls, final read."""
+    if not trace:
+        return
+    records = result.telemetry.records
+    tool_calls = sum(1 for e in result.state.events if e.kind == "tool")
+    tool_errors = sum(1 for e in result.state.events
+                      if e.kind == "tool" and not e.content.startswith("OK"))
+    drafts = sum(1 for e in result.state.events if e.kind == "draft")
+    lines = [
+        f"model: {model_label(runner.client, mode)}",
+        f"policy v{getattr(runner.policy, 'version', '?')} · "
+        f"turns {len(records)}/{runner.max_turns} · "
+        f"tools {tool_calls} ({tool_errors} errors)"
+        + (f" · drafts {drafts}" if drafts else ""),
+    ]
+    final = result.evaluation
+    if final is not None:
+        for name, d in final.decisions.items():
+            probs = getattr(d, "probabilities", None) or {}
+            if probs:
+                top = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:2]
+                alt = f" (runner-up: {top[1][0]} {top[1][1]:.2f})" if len(top) > 1 else ""
+            else:
+                alt = ""
+            lines.append(f"  final {name} = {d.value} (conf {d.confidence:.2f}){alt}")
+    if result.state.events:
+        last = result.state.events[-1]
+        lines.append(f"  last event t{last.turn} [{last.kind}:{last.source}] {last.content[:120]}")
+    print(panel(f"{agent} · summary", lines))
+
+
 def run_once(agent: str, task: str, fields: dict, gates: tuple[float, float],
              max_turns: int, trace: bool, client=None, mode: str = "mock",
              auto_yes: bool = False, telemetry_out: str | None = None,
-             gen_opts: dict | None = None) -> tuple[object, int]:
+             gen_opts: dict | None = None, verbose: bool = False) -> tuple[object, int]:
     """Run one task; return (result, exit_code)."""
     spinner = Spinner(f"running {agent} on {mode}")
 
+    runner_box: dict = {}
+
     def on_turn(turn, evaluation, gate, actions):
         spinner.__exit__()  # first turn flowing: hand over from spinner to stream
-        print_turn(turn, evaluation, gate, actions, trace)
+        r = runner_box.get("runner")
+        print_turn(turn, evaluation, gate, actions, trace,
+                   questions=getattr(getattr(r, "policy", None), "questions", None),
+                   gate_obj=getattr(r, "confidence_gate", None),
+                   verbose=verbose)
 
     def on_confirm(evaluation, state):
         if auto_yes:
@@ -222,11 +331,21 @@ def run_once(agent: str, task: str, fields: dict, gates: tuple[float, float],
     runner = build_runner(agent, client, gates, max_turns,
                           on_turn=on_turn, on_confirm=on_confirm,
                           gen_opts=gen_opts)
+    runner_box["runner"] = runner
+    if verbose:
+        try:
+            state_preview = runner.state_builder.assemble(
+                __import__("harness").State(task=task, fields=fields))[:600]
+            print(panel("model input · state preview (truncated)",
+                        [state_preview.replace("\n", " ⏎ ")]))
+        except Exception:  # noqa: BLE001 — preview is best-effort
+            pass
     spinner = Spinner(f"running {agent} on {mode}")
     with spinner:
         result = runner.run(task, fields)
     print_events(result, trace)
     print("\n" + outcome_banner(result.outcome))
+    print_summary(agent, result, runner, mode, trace)
     if telemetry_out:
         result.telemetry.to_jsonl(telemetry_out)
         print(style(f"telemetry → {telemetry_out}", dim=True))
@@ -235,9 +354,39 @@ def run_once(agent: str, task: str, fields: dict, gates: tuple[float, float],
 
 
 def cmd_list(_args) -> int:
-    rows = [f"  {style(name.ljust(18), fg=CYAN, bold=True)} {info['description']}"
-            for name, info in AGENTS.items()]
+    rows = []
+    for name, info in AGENTS.items():
+        try:
+            runner_or_pair = info["build"](info["mock_client"](), {})
+            runner = runner_or_pair[0] if isinstance(runner_or_pair, tuple) else runner_or_pair
+            n_q = len(runner.policy.questions)
+            tools = ", ".join(_tool_names(runner)) or "—"
+            rows.append(f"  {style(name.ljust(18), fg=CYAN, bold=True)} {info['description']}")
+            rows.append(style(f"    {'':<18} {n_q} questions · tools: {tools}", dim=True))
+        except Exception:  # noqa: BLE001 — list must work even if a build fails
+            rows.append(f"  {style(name.ljust(18), fg=CYAN, bold=True)} {info['description']}")
+    rows.append("")
+    rows.append(style("  tip: `inspect <agent>` shows its questions, tools, and gate", dim=True))
     print(panel("agents", rows))
+    return EXIT_OK
+
+
+def cmd_inspect(args) -> int:
+    """Show the full decision space of one agent (understand the model)."""
+    agent = args.agent
+    if agent not in AGENTS:
+        print(f"error: unknown agent '{agent}' (see `list`)", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        client, mode = select_client(agent, args.mock, args.real)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_USAGE
+    gen_opts = gen_opts_from(args) if hasattr(args, "generator") else {}
+    runner_or_pair = AGENTS[agent]["build"](client, gen_opts)
+    runner = runner_or_pair[0] if isinstance(runner_or_pair, tuple) else runner_or_pair
+    print(panel(f"{agent} · inspect", agent_card_lines(agent, runner, mode)))
+    print_guide(agent)
     return EXIT_OK
 
 
@@ -315,7 +464,12 @@ def cmd_show(args) -> int:
         else:
             print()
         for name, d in rec.get("decisions", {}).items():
-            print(fmt_decision(name, d.get("value"), float(d.get("confidence", 0.0))))
+            print(fmt_decision(name, d.get("value"), float(d.get("confidence", 0.0))), end="")
+            margin = fmt_margin(d.get("probabilities"))
+            print(f"  {margin}" if margin else "")
+            dist = fmt_distribution(d.get("probabilities"))
+            if dist:
+                print(dist)
         for a in rec.get("actions", []):
             tool = a.get("tool")
             if tool:
@@ -398,22 +552,25 @@ def cmd_run(args) -> int:
         return code
     print(panel(f"{args.agent} · {mode}",
                 [f"task: {args.task}", f"fields: {json.dumps(fields)}",
+                 f"model: {model_label(client, mode)}",
                  f"gates: auto={args.auto} escalate={args.escalate}"]))
     print_guide(args.agent)
     _, code = run_once(args.agent, args.task, fields, (args.auto, args.escalate),
                        args.max_turns, trace=not args.quiet, client=client, mode=mode,
                        auto_yes=args.yes, telemetry_out=args.telemetry_out,
-                       gen_opts=gen_opts_from(args))
+                       gen_opts=gen_opts_from(args), verbose=args.verbose)
     return code
 
 
 REPL_HELP = (":fields {...}  set fields  ·  :agent <name>  switch agent  ·  "
              ":gates <auto> <esc>  retune  ·  :trace on|off  ·  :guide  ·  "
+             ":inspect [agent]  show decision space  ·  :questions  list questions  ·  "
+             ":verbose on|off  ·  "
              ":retry  rerun last task  ·  :task  multi-line task  ·  :quit")
 
 
-REPL_COMMANDS = ("fields", "agent", "gates", "trace", "guide", "retry",
-                 "task", "help", "quit", "q", "exit")
+REPL_COMMANDS = ("fields", "agent", "gates", "trace", "guide", "inspect", "questions",
+                 "verbose", "retry", "task", "help", "quit", "q", "exit")
 
 try:
     import readline as _readline
@@ -459,8 +616,10 @@ def cmd_repl(args) -> int:
     gates: tuple[float, float] = (args.auto, args.escalate)
     fields: dict = dict(AGENTS[agent]["example_fields"])
     trace = True
+    verbose = bool(getattr(args, "verbose", False))
     print(panel(f"sokit repl · {agent} · {mode}",
                 [AGENTS[agent]["description"],
+                 f"model: {model_label(client, mode)}",
                  f"gates: auto={gates[0]} escalate={gates[1]}",
                  REPL_HELP]))
     print_guide(agent)
@@ -471,7 +630,7 @@ def cmd_repl(args) -> int:
         last = (task_text, dict(fields))
         run_once(agent, task_text, dict(fields), gates, args.max_turns, trace,
                  client=client, mode=mode, auto_yes=args.yes,
-                 gen_opts=gen_opts_from(args))
+                 gen_opts=gen_opts_from(args), verbose=verbose)
 
     def read_multiline() -> str | None:
         print(style("(multi-line task — end with a single . on its own line)", dim=True))
@@ -548,6 +707,31 @@ def cmd_repl(args) -> int:
                 elif cmd == "trace":
                     trace = rest.strip().lower() not in ("off", "0", "no")
                     print(style(f"trace {'on' if trace else 'off'}", dim=True))
+                elif cmd == "verbose":
+                    arg = rest.strip().lower()
+                    if not arg:
+                        verbose = not verbose
+                    else:
+                        verbose = arg not in ("off", "0", "no")
+                    print(style(f"verbose {'on' if verbose else 'off'}"
+                                " (question definitions + state preview)", dim=True))
+                elif cmd == "inspect":
+                    target = rest.strip() or agent
+                    if target not in AGENTS:
+                        print(f"unknown agent '{target}' — {', '.join(AGENTS)}")
+                    else:
+                        runner_or_pair = AGENTS[target]["build"](client, gen_opts_from(args))
+                        r = runner_or_pair[0] if isinstance(runner_or_pair, tuple) else runner_or_pair
+                        print(panel(f"{target} · inspect",
+                                    agent_card_lines(target, r, mode)))
+                elif cmd == "questions":
+                    runner_or_pair = AGENTS[agent]["build"](client, gen_opts_from(args))
+                    r = runner_or_pair[0] if isinstance(runner_or_pair, tuple) else runner_or_pair
+                    for name, q in r.policy.questions.items():
+                        print(fmt_question(name, q))
+                        opts = list(getattr(q, "options", None) or getattr(q, "levels", None) or [])
+                        if opts:
+                            print(style(f"      options: {', '.join(opts)}", dim=True))
                 else:
                     print(f"unknown command ':{cmd}' — {REPL_HELP}")
                 continue
@@ -595,6 +779,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-turns", type=int, default=6)
     r.add_argument("--quiet", action="store_true", help="outcome banner only")
     r.add_argument("--yes", action="store_true", help="auto-approve confirm gates")
+    r.add_argument("--verbose", action="store_true",
+                   help="show question definitions + state preview + full distributions")
     r.add_argument("--telemetry-out", default=None, help="dump telemetry to JSONL")
     r.add_argument("--transcript-out", default=None, help="capture full session output to a file")
 
@@ -606,7 +792,15 @@ def build_parser() -> argparse.ArgumentParser:
     repl.add_argument("--escalate", type=float, default=0.5)
     repl.add_argument("--max-turns", type=int, default=6)
     repl.add_argument("--yes", action="store_true", help="auto-approve confirm gates")
+    repl.add_argument("--verbose", action="store_true",
+                      help="show question definitions + state preview + full distributions")
     repl.add_argument("--transcript-out", default=None, help="capture full session output to a file")
+
+    insp = sub.add_parser("inspect", help="show an agent's decision space (questions, tools, gate)")
+    _client_flags(insp)
+    _generator_flags(insp)
+    insp.add_argument("agent", nargs="?", default="support",
+                      help="agent name (see list)")
 
     e = sub.add_parser("eval", help="labeled-eval regression gate (offline)")
     e.add_argument("--cases", default=None, help="JSONL cases file (default: bundled eval_cases)")
@@ -623,6 +817,8 @@ def main(argv: list[str] | None = None) -> int:
     with transcript(getattr(args, "transcript_out", None)):
         if args.command == "list":
             return cmd_list(args)
+        if args.command == "inspect":
+            return cmd_inspect(args)
         if args.command == "run":
             return cmd_run(args)
         if args.command == "repl":

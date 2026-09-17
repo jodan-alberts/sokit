@@ -98,6 +98,60 @@ def fmt_decision(name: str, value: object, confidence: float,
     return f"  {name_s}  {value!s:<16} {conf_bar(confidence, force=force)}"
 
 
+def fmt_distribution(probs: dict | None, top: int = 3,
+                     force: bool | None = None) -> str:
+    """Compact sorted distribution, e.g. ``refund 0.90 · done 0.03 · …``.
+
+    Shows the top-N options by probability (descending) so the runner-up
+    — how close the model was to choosing differently — is visible.
+    Returns "" when there is nothing to show.
+    """
+    if not probs:
+        return ""
+    ranked = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    parts = [f"{k} {float(v):.2f}" for k, v in ranked]
+    return style("    ↳ " + " · ".join(parts), dim=True, force=force)
+
+
+def fmt_margin(probs: dict | None, force: bool | None = None) -> str:
+    """Margin between the top-2 options (Choice/Noul decisiveness signal)."""
+    if not probs or len(probs) < 2:
+        return ""
+    ranked = sorted(probs.values(), reverse=True)
+    return style(f"margin +{ranked[0] - ranked[1]:.2f}", dim=True, force=force)
+
+
+def fmt_question(name: str, question: object, force: bool | None = None) -> str:
+    """One-line question definition: type, instructions, and option set."""
+    qtype = str(getattr(question, "type", "?"))
+    try:
+        qtype = question.type.value  # QuestionType enum -> "choice"/"score"/"noul"
+    except Exception:  # noqa: BLE001
+        pass
+    instructions = getattr(question, "instructions", "") or ""
+    options = list(getattr(question, "options", None) or [])
+    levels = list(getattr(question, "levels", None) or [])
+    choices = options or levels
+    suffix = f" [{', '.join(choices)}]" if choices else ""
+    return style(f"    ? ({qtype}) {instructions}{suffix}", dim=True, force=force)
+
+
+def fmt_gate_detail(gate: str, confidences: dict[str, float] | None,
+                    auto: float | None = None, escalate: float | None = None,
+                    gated_questions: list[str] | None = None,
+                    force: bool | None = None) -> str:
+    """Why the gate fired: min-confidence driver + thresholds + scope."""
+    if not confidences:
+        return ""
+    driver = min(confidences, key=lambda k: confidences[k])
+    detail = f"gate {gate} · min conf {confidences[driver]:.2f} on '{driver}'"
+    if auto is not None and escalate is not None:
+        detail += f" (auto≥{auto:g} esc<{escalate:g})"
+    if gated_questions:
+        detail += f" scoped to [{', '.join(gated_questions)}]"
+    return style("    " + detail, dim=True, force=force)
+
+
 def fmt_action(action: object, force: bool | None = None) -> str:
     tool = getattr(action, "tool", None)
     name = style(getattr(action, 'name', '?'), fg=MAGENTA, force=force)

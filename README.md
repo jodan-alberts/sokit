@@ -186,11 +186,24 @@ Flags work globally or per-subcommand.
 **`run` flags.** Positional `agent` + `task`; `--fields '{"k": "v"}'`
 (JSON object), `--auto/--escalate` gate overrides (the factory gate's
 question scoping is preserved), `--max-turns`, `--quiet` (banner only),
-`--yes` (auto-approve confirm gates), `--telemetry-out run.jsonl`,
+`--verbose` (question definitions + state preview on top of the default
+trace), `--yes` (auto-approve confirm gates), `--telemetry-out run.jsonl`,
 `--transcript-out session.log`, and `--generator mock|openai|anthropic`
 with `--generator-model`/`--base-url` for the `draft` agent. Exit codes:
 `0` completed, `1` any other outcome, `2` usage error (unknown agent, bad
 `--fields`, missing LLM key).
+
+**Understanding the model.** Every turn shows the decision *plus* what the
+model considered and why the gate fired: the top-3 probability mass per
+question (so the runner-up is visible), the top-2 margin (decisiveness),
+and a gate line naming the min-confidence driver, thresholds, and scope
+(`scoped to [next_action]` vs all questions). Runs open with the model
+identity (`mock (deterministic, offline)` vs live TypeSafe model +
+endpoint) and close with a summary (policy version, turns, tool
+calls/errors, final values with runners-up, last event). `--verbose`
+adds each question's type + instructions + options and a truncated
+preview of the assembled state the model actually read. `show
+<run.jsonl>` re-renders the same distributions from saved telemetry.
 
 **`repl` commands.** Type a task to run it (fresh runner per task, so no
 idempotency/memory bleed across runs). Every agent prints a short guide on
@@ -200,8 +213,9 @@ commands:
 ```
 :fields {...}  set persistent fields   :agent <name>  switch agent
 :gates <auto> <esc>  retune live       :trace on|off  :guide
-:retry  rerun last task               :task  multi-line task (end with .)
-:help  :quit
+:inspect [agent]  decision space       :questions  list questions
+:verbose on|off                       :retry  rerun last task
+:task  multi-line task (end with .)   :help  :quit
 ```
 
 Tab-completion for commands/agents and persistent history
@@ -212,12 +226,15 @@ batch-approves. Colors auto-disable when piped or under `NO_COLOR`.
 
 **More commands.** `doctor` checks the environment (Python version, API
 keys, sqlite3, endpoint reachability, readline); `eval` runs the
-labeled-eval regression gate (`--cases`, `--error-budget`); `show
-<run.jsonl>` re-renders saved telemetry.
+labeled-eval regression gate (`--cases`, `--error-budget`); `inspect
+<agent>` shows the full decision space (questions + options, tools, gate,
+policy version); `show <run.jsonl>` re-renders saved telemetry with
+distributions.
 
 ```bash
 python3 -m examples.cli doctor
 python3 -m examples.cli eval
+python3 -m examples.cli inspect support --mock
 python3 -m examples.cli show run.jsonl
 ```
 
