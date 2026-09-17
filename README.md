@@ -58,7 +58,7 @@ pip install -e ".[typesafe]" # + requests for the real TypeSafe API
 ```python
 from harness import TypeSafeClient, Runner, Policy, ToolRegistry, StateBuilder, ConfidenceGate
 
-client = TypeSafeClient(model="jev-1.13.0")   # pin a version, not jev-latest
+client = TypeSafeClient()  # default model is jev-latest; pin a released version once available
 runner = Runner(
     client=client,
     policy=Policy(questions=... , resolvers=[...]),

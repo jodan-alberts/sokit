@@ -44,7 +44,7 @@ class TypeSafeClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "jev-latest",  # prefer a pinned version, e.g. "jev-1.13.0"
+        model: str = "jev-latest",  # prefer a pinned released version over the moving alias
         endpoint: str = "https://api.typesafe.ai/v1/systemone",
         timeout: float = 30.0,
         max_retries: int = 4,
@@ -108,7 +108,9 @@ class TypeSafeClient:
         for name, q in questions.items():
             item = answers.get(name) or {}
             if q.type is QuestionType.NOUL:
-                # Noul returns a 0..1 probability and no separate confidence field.
+                # Noul returns a 0..1 probability and no separate confidence field,
+                # so confidence is approximated from P(yes). Treat Noul confidence
+                # as less principled than Choice/Score confidence when gating.
                 prob = float(item.get("noul", 0.0))
                 decisions[name] = Decision(
                     name, q.type, prob >= 0.5,

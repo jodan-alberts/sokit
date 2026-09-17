@@ -19,7 +19,10 @@ A System One model is a **decision function**, not a text generator:
 
 - It emits typed answers only: **Choice** (pick from a fixed option set), **Score**
   (rate on an ordered rubric), **Noul** (yes/no with calibrated probability).
-- Every answer carries a **calibrated probability + confidence**.
+- Every answer carries a **calibrated probability**. **Choice** and **Score** add a
+  separate **confidence**; **Noul** returns only a probability (no separate confidence
+  field), so this harness reuses the probability as the confidence — an approximation,
+  and a less principled gating signal than Choice/Score confidence.
 - It evaluates all questions **in parallel against one shared state** — questions in a
   single call cannot reference each other's answers.
 - It **cannot** generate strings, so it cannot write tool-call arguments, prose, or
@@ -27,9 +30,10 @@ A System One model is a **decision function**, not a text generator:
 - It **cannot** self-loop or perform I/O.
 
 Consequence: the model is a **policy** `π(state, questions) → P(action)`. Everything with
-side effects, memory, or time lives in the harness. This is not a workaround — it is
-TypeSafe's intended usage pattern (their docs describe "confidence-gated routing",
-"speculative fan-out", "composite scoring", and "intent routing").
+side effects, memory, or time lives in the harness. This is not a workaround — it matches
+TypeSafe's intended usage: their docs describe "confidence-gated routing" and
+"speculative fan-out", and prescribe score-then-choose composition for large option sets
+(the pattern §6 calls composite scoring).
 
 > **LLM contrast.** An LLM agent generates the next text (including tool-call JSON) and
 > reasons via chain-of-thought. A System One harness pre-declares the finite action space
@@ -78,7 +82,7 @@ TypeSafe's intended usage pattern (their docs describe "confidence-gated routing
 |---|---|
 | `State` | The working memory: task, structured fields, decision history, tool-event log. |
 | `StateBuilder` | Renders `State` + external context into the bounded text/blob the model consumes. |
-| `SystemOneClient` | Thin adapter over the decision API (TypeSafe `jev-*`, a local model, or a mock). |
+| `SystemOneClient` | Thin adapter over the decision API (TypeSafe `jev-latest` or a pinned version, or a mock). |
 | `Policy` | Declares the **decision space**: which questions to ask, how answers map to `Action`s. |
 | `ConfidenceGate` | Maps calibrated confidence → `act` / `confirm` / `escalate`. |
 | `ToolRegistry` | Executes tools; resolves args from state/decisions (never model text); enforces idempotency. |
@@ -172,9 +176,10 @@ All questions in one call are answered in parallel against the same state and **
 reference each other**. So "route, then ask route-specific questions" is inherently
 multi-pass. Per turn, use:
 
-1. **Pass 1 — guards + routing**: cheap `Noul`s (`is_done`, `is_blocked`, `needs_human`)
-   plus a routing `Choice` (`next_intent`). Nouls are the cheapest primitive; use them
-   liberally as guards.
+1. **Pass 1 — guards + routing**: `Noul`s (`is_done`, `is_blocked`, `needs_human`)
+   plus a routing `Choice` (`next_intent`). Nouls are the lightest-weight primitive;
+   use them liberally as guards. (Pricing is input-token-based with free output, so
+   per-primitive cost differences are negligible — the saving is clarity, not tokens.)
 2. **Pass 2 — route-specific questions**: only the questions relevant to the chosen route.
 
 `Policy.select_questions(state)` lets the harness decide the question set per turn (e.g.
@@ -182,10 +187,13 @@ only ask `refundable` once account context is present).
 
 ---
 
-## 6. Action-space design (avoid the 255-option trap)
+## 6. Action-space design (keep routing Choices small)
 
-`Choice` is capped at 255 options, and quality degrades well before that. Do **not** expose
-one flat `next_action` over every tool:
+`Choice` is capped at 255 options; above that, TypeSafe prescribes a two-stage
+score-then-choose pattern. As a heuristic, keep routing Choices small anyway: large flat
+option sets spread the probability mass thin and are harder to calibrate. We have not
+measured the degradation curve ourselves — validate on your labeled data (see §8).
+Do **not** expose one flat `next_action` over every tool:
 
 - **Routing Choice** (intents/tool groups, <20) → **per-route argument decisions** (fixed
   schema per tool). Bounds the space to `|routes| + max|args-per-route|`, not the product.
@@ -227,20 +235,23 @@ confidence channel is worthless.
 
 ---
 
-## 9. Termination & safety guarantees
+## 9. Termination & safety
 
-The model cannot self-correct a stuck loop (it has no sampling noise to exploit). The
-harness guarantees progress via:
+The model is low-variance across identical calls (TypeSafe: "similar answers for similar
+inputs"), so it cannot sample its way out of a stuck loop. The harness bounds the loop
+mechanically, and policy authors must follow one rule. Budgets and detection are enforced
+in `Runner`; the option-set rule is on you:
 
-- **Monotonic budgets**: `max_turns`, `max_tool_calls`.
-- **No-progress detection**: if the (decisions + events) fingerprint is unchanged for N
+- **Monotonic budgets** (enforced): `max_turns`, `max_tool_calls`.
+- **No-progress detection** (enforced): if the (decisions + events) fingerprint is unchanged for N
   turns, escalate.
-- **Idempotent tool execution**: a `(tool, args)` pair is never re-run with the same args
+- **Idempotent tool execution** (enforced): a `(tool, args)` pair is never re-run with the same args
   unless explicitly allowed — prevents re-executing side effects in a stuck loop.
-- **`done` / `escalate` always in the option set**.
+- **`done` / `escalate` in every routing Choice** (policy-author rule, not enforced in code):
+  there must always be a way out.
 
 Low-confidence retry is allowed **only with augmented state** (more context/history).
-Re-asking the identical call is pointless for a deterministic-in-expectation model.
+Re-asking the identical call is low-value for a low-variance model.
 
 ---
 
@@ -262,7 +273,7 @@ into "just an LLM agent" and the System One model becomes redundant.
 
 - Endpoint: `POST https://api.typesafe.ai/v1/systemone`, body `{model, state, questions}`.
   Questions are keyed by name with `type` ∈ `{noul, choice, score}` (note: `noul`, not
-  `boolean` — some third-party gateways rename it; prefer the first-party SDK).
+  `boolean`).
 - **Pin the model version** (`jev-1.x.y`) rather than relying on the `jev-latest` alias.
 - **Version your question schemas** (`Policy.version`). The `instructions`/`criteria` text is
   the entire decision definition — treat it as a prompt to be versioned and evaluated;
@@ -273,8 +284,10 @@ into "just an LLM agent" and the System One model becomes redundant.
 
 ## 12. Extension points
 
-- `SystemOneClient` — swap TypeSafe for a local model (`DavidHatley/system-one-mini`) or a
-  deterministic mock.
+- `SystemOneClient` — swap TypeSafe for a deterministic mock, or adapt a local model.
+  (`DavidHatley/system-one-mini` exists on Hugging Face but is a fixed-head research
+  prototype — five preset decisions over short inputs — not a drop-in replacement for
+  arbitrary questions; it would need an adapter, not a swap.)
 - `ContextProvider` — add `SqlProvider`, `WebSearchProvider`, vector-store RAG, etc.
 - `LongTermMemory` — swap the in-memory store for a vector DB.
 - `TextGenerator` (LLM bridge) — plug in for pattern B.
