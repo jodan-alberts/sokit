@@ -166,6 +166,52 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("outcome: escalated", out)
 
+    def test_confirm_yes_via_input(self):
+        with patch("builtins.input", return_value="y"):
+            self.assertTrue(cli.read_confirm_answer("prompt? "))
+
+    def test_confirm_no_via_input(self):
+        with patch("builtins.input", return_value=""):
+            self.assertFalse(cli.read_confirm_answer("prompt? "))
+
+    def test_confirm_eof_falls_back_to_tty(self):
+        from unittest.mock import mock_open
+
+        with patch("builtins.input", side_effect=EOFError):
+            with patch("builtins.open", mock_open(read_data="yes\n")):
+                self.assertTrue(cli.read_confirm_answer("prompt? "))
+
+    def test_confirm_eof_no_tty_declines(self):
+        with patch("builtins.input", side_effect=EOFError):
+            with patch("builtins.open", side_effect=OSError("no tty")):
+                self.assertFalse(cli.read_confirm_answer("prompt? "))
+
+    def test_confirm_eof_empty_tty_declines(self):
+        from unittest.mock import mock_open
+
+        with patch("builtins.input", side_effect=EOFError):
+            with patch("builtins.open", mock_open(read_data="")):
+                self.assertFalse(cli.read_confirm_answer("prompt? "))
+
+    def test_confirm_shows_approval_context(self):
+        # Approving everything: the prompt must show what is being approved.
+        with patch("builtins.input", return_value="y"):
+            code, out = run_cli(["run", "support", "I want a refund",
+                                 "--fields", '{"account_id": "acct_123"}',
+                                 "--mock", "--auto", "0.999", "--quiet"])
+        self.assertEqual(code, 0)
+        self.assertIn("approval needed (turn 1)", out)
+        self.assertIn("next_action", out)
+
+    def test_validator_confirm_shows_draft(self):
+        with patch("builtins.input", return_value="y"):
+            code, out = run_cli(["run", "draft", "I want a refund",
+                                 "--fields", '{"account_id": "acct_123"}',
+                                 "--mock", "--auto", "0.999", "--quiet"])
+        self.assertEqual(code, 0)
+        self.assertIn("approval needed: validate draft", out)
+        self.assertIn("Kind regards", out)
+
     def test_telemetry_out_written(self):
         import json
         import tempfile

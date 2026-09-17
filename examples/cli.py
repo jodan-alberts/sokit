@@ -299,7 +299,70 @@ def print_summary(agent: str, result, runner, mode: str, trace: bool = True) -> 
     if result.state.events:
         last = result.state.events[-1]
         lines.append(f"  last event t{last.turn} [{last.kind}:{last.source}] {last.content[:120]}")
+    if result.outcome != "completed" and records and records[-1].note:
+        lines.append(f"  note: {records[-1].note}")
     print(panel(f"{agent} · summary", lines))
+
+
+def read_confirm_answer(prompt_text: str) -> bool:
+    """Read a y/n answer, tolerating non-interactive stdin.
+
+    Plain ``input()`` raises EOFError instantly when stdin is piped or
+    closed (IDE run panels, agent harnesses, ``cmd | cli``), which used to
+    silently count as "declined". Fall back to the controlling terminal
+    (/dev/tty) so the human actually gets asked; only a real y/yes
+    approves.
+    """
+    try:
+        answer = input(prompt_text)
+        return answer.strip().lower() in ("y", "yes")
+    except EOFError:
+        pass
+    try:
+        with open("/dev/tty", encoding="utf-8") as tty:
+            sys.stdout.write(prompt_text)
+            sys.stdout.flush()
+            line = tty.readline()
+    except OSError:
+        return False
+    if not line:
+        return False
+    return line.strip().lower() in ("y", "yes")
+
+
+def print_approval_context(evaluation, state, runner) -> None:
+    """Show what the human is approving.
+
+    The Runner fires ``on_confirm`` *before* the ``on_turn`` streaming hook
+    (actions aren't resolved yet), so without this the prompt appears above
+    the turn trace and the human approves blind. Validator confirms (the
+    ``draft_ok`` re-evaluation) also surface the draft text under judgment.
+    """
+    gate_obj = getattr(runner, "confidence_gate", None) if runner is not None else None
+    decisions = evaluation.decisions
+    is_validator = "next_action" not in decisions
+    if is_validator:
+        print(f"\n{style(f'── approval needed: validate draft (turn {state.turn})', bold=True)}")
+        for e in reversed(state.events):
+            if e.kind == "draft":
+                snippet = e.content if len(e.content) <= 400 else e.content[:400] + "…"
+                print(style(f"  draft [{e.source}]:", dim=True))
+                for line in snippet.splitlines() or [""]:
+                    print(f"    {line}")
+                break
+    else:
+        print(f"\n{style(f'── approval needed (turn {state.turn})', bold=True)}")
+    for name, d in decisions.items():
+        print(fmt_decision(name, d.value, d.confidence))
+    if gate_obj is not None:
+        scoped = list(decisions) if is_validator else gate_obj.questions
+        confs = {n: dd.confidence for n, dd in decisions.items()
+                 if not scoped or n in scoped}
+        vgate = ConfidenceGate(auto=gate_obj.auto, escalate=gate_obj.escalate,
+                               questions=scoped).gate(evaluation)
+        gated = scoped if (is_validator or gate_obj.questions) else None
+        print(fmt_gate_detail(vgate.value, confs, auto=gate_obj.auto,
+                              escalate=gate_obj.escalate, gated_questions=gated))
 
 
 def run_once(agent: str, task: str, fields: dict, gates: tuple[float, float],
@@ -322,11 +385,13 @@ def run_once(agent: str, task: str, fields: dict, gates: tuple[float, float],
     def on_confirm(evaluation, state):
         if auto_yes:
             return True
-        try:
-            answer = input(style("  [confirm] proceed? [y/N] ", fg=YELLOW, bold=True))
-        except EOFError:
-            return False
-        return answer.strip().lower() in ("y", "yes")
+        spinner.__exit__()  # freeze the spinner so the prompt renders (and stays) cleanly
+        print_approval_context(evaluation, state, runner_box.get("runner"))
+        approved = read_confirm_answer(
+            style("  [confirm] proceed? [y/N] ", fg=YELLOW, bold=True))
+        if not approved:
+            print(style("  declined — escalating", dim=True))
+        return approved
 
     runner = build_runner(agent, client, gates, max_turns,
                           on_turn=on_turn, on_confirm=on_confirm,
