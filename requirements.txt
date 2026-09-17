@@ -1,0 +1,3 @@
+# Core harness: stdlib only.
+# Optional, for the real TypeSafe API client:
+requests>=2.28
