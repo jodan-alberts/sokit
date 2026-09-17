@@ -284,10 +284,8 @@ into "just an LLM agent" and the System One model becomes redundant.
 
 ## 12. Extension points
 
-- `SystemOneClient` — swap TypeSafe for a deterministic mock, or adapt a local model.
-  (`DavidHatley/system-one-mini` exists on Hugging Face but is a fixed-head research
-  prototype — five preset decisions over short inputs — not a drop-in replacement for
-  arbitrary questions; it would need an adapter, not a swap.)
+- `SystemOneClient` — swap TypeSafe for a deterministic mock, or adapt a local
+  decision model behind the same protocol.
 - `ContextProvider` — add `SqlProvider`, `WebSearchProvider`, vector-store RAG, etc.
 - `LongTermMemory` — swap the in-memory store for a vector DB.
 - `TextGenerator` (LLM bridge) — plug in for pattern B.
