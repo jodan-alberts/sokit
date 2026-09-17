@@ -56,7 +56,6 @@ pip install -e ".[typesafe]" # + requests for the real TypeSafe API
 ## Using the real TypeSafe API
 
 ```python
-import os
 from harness import TypeSafeClient, Runner, Policy, ToolRegistry, StateBuilder, ConfidenceGate
 
 client = TypeSafeClient(model="jev-1.13.0")   # pin a version, not jev-latest
@@ -109,7 +108,7 @@ def delete_email(args, context):
     return ToolResult("delete_email", True, f"deleted {args['id']}")
 
 client = MockClient(rules={
-    "spam": {"yes": ["buy now", "viagra", "free money"], "no": []},
+    "spam": {"yes": ["buy now", "free money", "winner", "act now"], "no": []},
     "next": {"delete": ["spam"], "done": ["meeting"]},
 })
 tools = ToolRegistry().register(FunctionTool("delete_email", delete_email))

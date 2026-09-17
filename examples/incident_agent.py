@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from harness import (
     Action,
+    ClockProvider,
     ConfidenceGate,
     Decision,
     Document,
@@ -123,10 +124,6 @@ def runbook_provider(state):
     return [Document("runbook", RUNBOOK)]
 
 
-def clock_provider(state):
-    return [Document("clock", "2026-09-17T02:17:00Z")]
-
-
 # --- mock rules (deterministic offline narrative) ------------------------------
 def _decide(name, question, value, conf):
     options = question.options
@@ -172,7 +169,7 @@ def make_runner(client):
         .register(FunctionTool("page_oncall", page_oncall))
     )
     memory = InMemoryStore()
-    state_builder = StateBuilder(providers=[runbook_provider, clock_provider])
+    state_builder = StateBuilder(providers=[runbook_provider, ClockProvider()])
     policy = Policy(QUESTIONS, resolvers=[resolve])
     runner = Runner(
         client, policy, tools, state_builder,
@@ -186,7 +183,7 @@ def make_runner(client):
 
 def run_flat(client):
     """A single evaluate() call — the whole story for a flat System One model."""
-    state_builder = StateBuilder(providers=[runbook_provider, clock_provider])
+    state_builder = StateBuilder(providers=[runbook_provider, ClockProvider()])
     from harness.state import State
     text = state_builder.assemble(State(task=TASK))
     evaluation = client.evaluate(text, QUESTIONS)
