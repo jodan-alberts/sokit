@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "systemone-harness"
+name = "sokit"
 version = "0.1.0"
 description = "A decision-driven agent harness for System One models (iterate, call tools, access external datasources)."
 readme = "README.md"
