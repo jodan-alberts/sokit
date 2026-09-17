@@ -82,14 +82,15 @@ TypeSafe's intended usage: their docs describe "confidence-gated routing" and
 |---|---|
 | `State` | The working memory: task, structured fields, decision history, tool-event log. |
 | `StateBuilder` | Renders `State` + external context into the bounded text/blob the model consumes. |
-| `SystemOneClient` | Thin adapter over the decision API (TypeSafe `jev-latest` or a pinned version, or a mock). |
+| `SystemOneClient` | Thin adapter over the decision API (TypeSafe `jev-latest` or a mock). |
 | `Policy` | Declares the **decision space**: which questions to ask, how answers map to `Action`s. |
 | `ConfidenceGate` | Maps calibrated confidence → `act` / `confirm` / `escalate`. |
-| `ToolRegistry` | Executes tools; resolves args from state/decisions (never model text); enforces idempotency. |
+| `ToolRegistry` | Executes tools; resolves args from state/decisions (never model text); timeouts, retries, idempotency. |
 | `ContextProvider` | Pluggable datasource adapters that inject external data into state. |
 | `LongTermMemory` | Durable store the harness writes/reads across runs. |
-| `Telemetry` + `calibration` | Logs every decision (full distribution) + outcome; supports offline calibration. |
-| `Runner` | Owns the loop, budgets, and termination guarantees. |
+| `Telemetry` + `calibration` + `eval` | Logs every decision (full distribution) + outcome; ECE diagnostics; labeled-eval loop with threshold tuner. |
+| `TextGenerator` | Optional LLM bridge for open-ended strings (validated before execution). |
+| `Runner` | Owns the loop, budgets, and termination guarantees; `on_turn` streaming hook, `on_confirm` approval hook. |
 
 ---
 
@@ -292,8 +293,9 @@ The LLM never makes the control-flow decision. The moment it does, the harness c
 into "just an LLM agent" and the System One model becomes redundant.
 
 Implemented in `harness/generate.py` (`TextGenerator` protocol, `MockGenerator`
-for offline use, `HttpGenerator` for OpenAI-compatible `/chat/completions` over
-stdlib urllib) plus the Runner's generate-then-validate path: an `Action` with
+for offline use, `HttpGenerator` for OpenAI-standard `/chat/completions`
+(OpenAI, OpenRouter, local servers) over stdlib urllib, `AnthropicGenerator`
+for the Messages API) plus the Runner's generate-then-validate path: an `Action` with
 `generate={"slot", "prompt", "validator", ...}` renders its prompt template,
 drafts via the generator (draft attached as an event), re-evaluates with a
 validator Noul gated by the same `ConfidenceGate` thresholds (scoped to the
@@ -311,8 +313,12 @@ validator).
 - Endpoint: `POST https://api.typesafe.ai/v1/systemone`, body `{model, state, questions}`.
   Questions are keyed by name with `type` ∈ `{noul, choice, score}` (note: `noul`, not
   `boolean`).
-- **Pin the model version** (`jev-1.13.0` at time of writing) rather than relying on the `jev-latest` alias.
-- Observed response shape (verified live against `jev-1.13.0`): `{model, answers: {<name>:
+- **Pin the model version** via the `model` param — though `jev-latest` is
+  currently the only available model. Until versions exist, compensate by
+  logging the resolved `model` from every response (e.g. `jev-1.13.0` at time
+  of writing) alongside `request_id` in telemetry, so silent model moves show
+  up as behavior shifts in your eval gate rather than mysteries.
+- Observed response shape (verified live; the alias resolved to `jev-1.13.0`): `{model, answers: {<name>:
   {type, noul|choice|score, confidence?, probabilities?, legend? (score index→label), stats}},
   usage: {input_tokens, output_tokens}, request_id, evaluation_time_ms}`.
   `Noul` returns only `noul` (P(yes)) — no separate confidence field, so the harness
@@ -338,7 +344,8 @@ validator).
   (append-per-add, crash-tolerant, same keyword ranking; single-writer, no
   locking) for persistence; vector DBs remain a documented future.
 - `TextGenerator` (LLM bridge) — `MockGenerator` offline, `HttpGenerator`
-  (OpenAI-compatible, key from env) for pattern B.
+  (OpenAI-standard, key from env) or `AnthropicGenerator` for pattern B.
 - `on_confirm` — plug in human-in-the-loop approval.
 
-See `README.md` for usage; `examples/support_agent.py` is a runnable end-to-end demo.
+See `README.md` for usage; `python3 -m examples.cli repl` is the interactive
+entry point, `examples/support_agent.py` a runnable end-to-end demo.

@@ -15,7 +15,7 @@ from .eval import (
     run_suite,
     sweep_thresholds,
 )
-from .generate import HttpGenerator, MockGenerator, TextGenerator
+from .generate import AnthropicGenerator, HttpGenerator, MockGenerator, TextGenerator
 from .calibration import expected_calibration_error, reliability_table
 from .client import MockClient, SystemOneClient, TypeSafeClient
 from .confidence import ConfidenceGate, Gate
@@ -47,6 +47,7 @@ from .tools import FunctionTool, ToolRegistry, ToolResult
 
 __all__ = [
     "Action",
+    "AnthropicGenerator",
     "CaseResult",
     "ClockProvider",
     "ConfidenceGate",

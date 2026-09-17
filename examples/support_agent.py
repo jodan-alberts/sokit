@@ -175,10 +175,9 @@ def mock_rules():
     }
 
 
-def main():
+def make_runner(client):
+    """Build the support-ticket runner (shared with examples/cli.py)."""
     init_account_db()
-    client = MockClient(rules=mock_rules())
-
     tools = (
         ToolRegistry()
         .register(FunctionTool("lookup_account", lookup_account))
@@ -187,10 +186,15 @@ def main():
     state_builder = StateBuilder(providers=[kb_provider])
     gate = ConfidenceGate(auto=0.8, escalate=0.5)
     memory = InMemoryStore()
-
     policy = Policy(questions, resolvers=[resolve], select_questions=select_questions)
     runner = Runner(client, policy, tools, state_builder,
                     confidence_gate=gate, longterm_memory=memory, max_turns=6)
+    return runner, memory
+
+
+def main():
+    client = MockClient(rules=mock_rules())
+    runner, memory = make_runner(client)
 
     result = runner.run(
         task="Customer says: 'I want a refund for my subscription, please.'",

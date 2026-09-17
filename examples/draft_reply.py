@@ -78,22 +78,27 @@ def resolve(evaluation, state):
     return [Action("done", terminal=True)]
 
 
-def main():
+def make_runner(client, generator):
+    """Build the draft-reply runner (shared with examples/cli.py)."""
     support_agent.init_account_db()
+    tools = (
+        ToolRegistry()
+        .register(FunctionTool("lookup_account", support_agent.lookup_account))
+        .register(FunctionTool("send_reply", send_reply))
+    )
+    return Runner(client, Policy(questions, resolvers=[resolve]), tools,
+                  StateBuilder(), confidence_gate=ConfidenceGate(auto=0.8, escalate=0.5),
+                  generator=generator, max_turns=6)
+
+
+def main():
     client = MockClient(rules={
         "next_action": next_action_rule,
         "draft_ok": {"yes": ["kind regards"], "no": []},
     })
     generator = MockGenerator(
         template="Hello! Your refund is on its way. Kind regards, Support")
-    tools = (
-        ToolRegistry()
-        .register(FunctionTool("lookup_account", support_agent.lookup_account))
-        .register(FunctionTool("send_reply", send_reply))
-    )
-    runner = Runner(client, Policy(questions, resolvers=[resolve]), tools,
-                    StateBuilder(), confidence_gate=ConfidenceGate(auto=0.8, escalate=0.5),
-                    generator=generator, max_turns=6)
+    runner = make_runner(client, generator)
     result = runner.run(
         task="Customer says: 'I want a refund for my subscription, please.'",
         fields={"account_id": "acct_123"},

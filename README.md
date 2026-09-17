@@ -24,15 +24,16 @@ harness/
   telemetry.py   # TurnRecord / Telemetry (decision + outcome logging)
   calibration.py # expected calibration error over labeled runs
   eval.py        # labeled-eval loop: grade_case, run_suite, sweep_thresholds
-  generate.py    # TextGenerator bridge (Mock + OpenAI-compatible HTTP)
+  generate.py    # TextGenerator bridge (Mock + OpenAI-standard + Anthropic)
   runner.py      # the loop: budgets, no-progress detection, escalation
 examples/
   support_agent.py   # end-to-end demo (SQLite-backed account lookup)
   incident_agent.py  # flat-vs-harness incident demo
   draft_reply.py     # generate-then-validate reply drafting (mock path)
   eval_demo.py + eval_cases.jsonl  # labeled-eval regression gate
+  cli.py             # interactive CLI (list/run/repl) + tui.py ANSI styling
 tests/
-  test_runner.py test_tools.py test_datasources.py test_eval.py test_generate.py
+  test_runner.py test_tools.py test_datasources.py test_eval.py test_generate.py test_cli.py
 ```
 
 ## Quick start
@@ -53,6 +54,11 @@ python3 -m examples.draft_reply
 # labeled-eval regression gate (accuracy/ECE + threshold tuner table)
 python3 -m examples.eval_demo
 
+# interactive CLI: list agents, one-shot runs, or a REPL shell
+python3 -m examples.cli list
+python3 -m examples.cli run support "I want a refund" --fields '{"account_id": "acct_123"}'
+python3 -m examples.cli repl draft
+
 # run the tests
 python3 -m unittest discover -s tests -v
 ```
@@ -69,7 +75,7 @@ pip install -e ".[typesafe]" # + requests for the real TypeSafe API
 ```python
 from harness import TypeSafeClient, Runner, Policy, ToolRegistry, StateBuilder, ConfidenceGate
 
-client = TypeSafeClient(model="jev-1.13.0")  # pin a released version, not the jev-latest alias
+client = TypeSafeClient()  # model="jev-latest"; pin model=... once versions exist
 runner = Runner(
     client=client,
     policy=Policy(questions=... , resolvers=[...]),
@@ -127,10 +133,74 @@ Action("draft", tool="send_reply", args={"account_id": "{{fields.account_id}}"},
        generate={"slot": "message",
                  "prompt": "Draft a refund reply for {{fields.account_id}}: {{task}}",
                  "validator": "Is this draft safe, correct, and on-policy?"})
-runner = Runner(..., generator=MockGenerator(template="..."))  # or HttpGenerator(...)
+runner = Runner(..., generator=MockGenerator(template="..."))  # offline
+```
+
+For a real LLM, pick a generator (keys from env — never flags, so they stay
+out of shell history):
+
+```python
+from harness import AnthropicGenerator, HttpGenerator
+
+Runner(..., generator=HttpGenerator())  # OpenAI (OPENAI_API_KEY)
+Runner(..., generator=HttpGenerator(    # OpenRouter (OpenAI-standard)
+    base_url="https://openrouter.ai/api/v1", model="openai/gpt-4o-mini",
+    extra_headers={"HTTP-Referer": "https://myapp.test", "X-Title": "sokit"}))
+Runner(..., generator=HttpGenerator(    # local OpenAI-standard server
+    base_url="http://localhost:11434/v1", model="llama3", api_key="ollama"))
+Runner(..., generator=AnthropicGenerator(model="claude-..."))  # ANTHROPIC_API_KEY
+```
+
+Or from the CLI (the `draft` agent showcasing the bridge end to end):
+
+```bash
+python3 -m examples.cli run draft "I want a refund" \
+  --fields '{"account_id": "acct_123"}' --generator openai
+python3 -m examples.cli run draft "I want a refund" \
+  --fields '{"account_id": "acct_123"}' --generator anthropic \
+  --generator-model claude-sonnet-4-5
+python3 -m examples.cli run draft "I want a refund" \
+  --fields '{"account_id": "acct_123"}' --generator openai \
+  --base-url https://openrouter.ai/api/v1 --generator-model openai/gpt-4o-mini
 ```
 
 See `python3 -m examples.draft_reply` and `DESIGN.md` §10.
+
+### CLI
+
+`examples/cli.py` (plus `examples/tui.py` ANSI styling, stdlib only) is the
+interactive entry point for demoing, playing with, and testing the agents:
+
+```bash
+python3 -m examples.cli list            # support · incident · draft
+python3 -m examples.cli run incident "pager" --mock
+python3 -m examples.cli repl                       # defaults to incident
+python3 -m examples.cli repl support
+```
+
+**Client selection.** `--mock` forces the deterministic mock, `--real`
+forces the live TypeSafe API (errors if `TYPESAFE_API_KEY` is missing).
+Default: live when a key is set, mock otherwise (with a stderr notice).
+Flags work globally or per-subcommand.
+
+**`run` flags.** Positional `agent` + `task`; `--fields '{"k": "v"}'`
+(JSON object), `--auto/--escalate` gate overrides (the factory gate's
+question scoping is preserved), `--max-turns`, `--quiet` (banner only),
+`--yes` (auto-approve confirm gates), `--telemetry-out run.jsonl`, and
+`--generator mock|openai|anthropic` with `--generator-model`/`--base-url`
+for the `draft` agent. Exit codes: `0` completed, `1` any other outcome,
+`2` usage error (unknown agent, bad `--fields`, missing LLM key).
+
+**`repl` commands.** Type a task to run it (fresh runner per task, so no
+idempotency/memory bleed across runs). Session commands:
+
+```
+:fields {...}  set persistent fields   :agent <name>  switch agent
+:gates <auto> <esc>  retune live       :trace on|off  :help  :quit
+```
+
+CONFIRM gates prompt `y/n` on stdin (the `on_confirm` hook); `--yes`
+batch-approves. Colors auto-disable when piped or under `NO_COLOR`.
 
 ## Minimal example
 

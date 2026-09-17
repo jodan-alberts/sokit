@@ -51,6 +51,7 @@ class Runner:
         no_progress_limit: int = 3,
         max_tool_errors: int = 3,
         on_confirm: Callable[[Evaluation, State], bool] | None = None,
+        on_turn: Callable[[int, Evaluation, Gate, list[Action]], None] | None = None,
     ) -> None:
         self.client = client
         self.policy = policy
@@ -64,6 +65,7 @@ class Runner:
         self.no_progress_limit = no_progress_limit
         self.max_tool_errors = max_tool_errors
         self.on_confirm = on_confirm
+        self.on_turn = on_turn
         self.telemetry = Telemetry()
 
     def run(self, task: str, fields: dict | None = None) -> RunResult:
@@ -102,6 +104,9 @@ class Runner:
 
             actions = self.policy.resolve(evaluation, state)
             note = "auto-approved" if gate is Gate.CONFIRM else ""
+            if self.on_turn is not None:
+                # Streaming hook for UIs (fire-and-forget: never affects control flow).
+                self.on_turn(turn, evaluation, gate, actions)
 
             terminal = False
             escalate = False

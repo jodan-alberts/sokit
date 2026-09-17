@@ -44,7 +44,7 @@ class TypeSafeClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "jev-1.13.0",  # pinned released version (verified); avoid the jev-latest alias
+        model: str = "jev-latest",  # pin via this param when versions exist; jev-latest is currently the only model
         endpoint: str = "https://api.typesafe.ai/v1/systemone",
         timeout: float = 30.0,
         max_retries: int = 4,
