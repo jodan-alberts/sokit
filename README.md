@@ -1,4 +1,4 @@
-# SystemOneHarness
+# SystemOneHarness (SOKIT — System One Knowledge Instructions Tools)
 
 A decision-driven agent harness for **System One models** (TypeSafe's Jev-class models).
 System One models make fast, calibrated, typed decisions but cannot generate text, call
