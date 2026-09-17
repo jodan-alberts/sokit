@@ -245,6 +245,7 @@ class TestCli(unittest.TestCase):
         script = [":fields {\"account_id\": \"acct_999\"}",
                   ":gates 0.7 0.4",
                   ":trace off",
+                  ":guide",
                   ":bogus",
                   ":agent draft",
                   ":quit"]
@@ -253,6 +254,110 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("switched to draft", out)
         self.assertIn("unknown command", out)
+        self.assertIn("guide", out)
+
+    def test_run_prints_agent_guide(self):
+        code, out = run_cli(["run", "support", "I want a refund",
+                             "--fields", '{"account_id": "acct_123"}', "--mock"])
+        self.assertEqual(code, 0)
+        self.assertIn("Try:", out)
+
+    def test_repl_retry_reruns_last_task(self):
+        with patch("builtins.input", side_effect=["I want a refund", ":retry", ":quit"]):
+            code, out = run_cli(["repl", "support", "--mock"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("outcome: completed"), 2)
+
+    def test_repl_multiline_task(self):
+        with patch("builtins.input", side_effect=[":task", "line one", "line two", ".", ":quit"]):
+            code, out = run_cli(["repl", "support", "--mock"])
+        self.assertEqual(code, 0)
+        self.assertIn("outcome:", out)
+
+    def test_completer(self):
+        from unittest.mock import patch as _patch
+
+        class StubReadline:
+            def __init__(self, buf):
+                self._buf = buf
+
+            def get_line_buffer(self):
+                return self._buf
+
+        with _patch.object(cli, "_readline", StubReadline(":fi")):
+            self.assertEqual(cli._repl_completer(":fi", 0), ":fields")
+            self.assertIsNone(cli._repl_completer(":fi", 1))
+        with _patch.object(cli, "_readline", StubReadline(":agent s")):
+            self.assertEqual(cli._repl_completer("s", 0), "support")
+        with _patch.object(cli, "_readline", StubReadline("hello")):
+            self.assertIsNone(cli._repl_completer("hello", 0))
+
+    def test_history_file_written(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            hist = fh.name
+        try:
+            import os as _os
+            from unittest.mock import patch as _patch
+            with _patch.dict(_os.environ, {"SOKIT_HISTORY": hist}):
+                with patch("builtins.input", side_effect=[":quit"]):
+                    code, _ = run_cli(["repl", "support", "--mock"])
+            self.assertEqual(code, 0)
+            self.assertTrue(_os.path.exists(hist))
+        finally:
+            _os.remove(hist)
+
+    def test_doctor(self):
+        code, out = run_cli(["doctor"])
+        self.assertEqual(code, 0)
+        for word in ("python", "TYPESAFE_API_KEY", "sqlite3"):
+            self.assertIn(word, out)
+
+    def test_transcript_out(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as fh:
+            path = fh.name
+        try:
+            import os as _os
+            code, _ = run_cli(["run", "support", "I want a refund",
+                               "--fields", '{"account_id": "acct_123"}',
+                               "--mock", "--quiet", "--transcript-out", path])
+            self.assertEqual(code, 0)
+            with open(path, encoding="utf-8") as fh:
+                body = fh.read()
+            self.assertIn("outcome: completed", body)
+        finally:
+            _os.remove(path)
+
+    def test_eval_subcommand(self):
+        code, out = run_cli(["eval"])
+        self.assertEqual(code, 0)
+        self.assertIn("question-accuracy", out)
+
+    def test_show_renders_telemetry(self):
+        import json
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as fh:
+            path = fh.name
+        try:
+            import os as _os
+            code, _ = run_cli(["run", "support", "I want a refund",
+                               "--fields", '{"account_id": "acct_123"}',
+                               "--mock", "--quiet", "--telemetry-out", path])
+            self.assertEqual(code, 0)
+            code, out = run_cli(["show", path])
+            self.assertEqual(code, 0)
+            self.assertIn("turn 1", out)
+            self.assertIn("billing", out)
+        finally:
+            _os.remove(path)
+
+    def test_show_missing_file(self):
+        code, _ = run_cli(["show", "/tmp/does-not-exist-sokit.jsonl"])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

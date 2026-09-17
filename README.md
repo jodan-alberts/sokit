@@ -186,21 +186,40 @@ Flags work globally or per-subcommand.
 **`run` flags.** Positional `agent` + `task`; `--fields '{"k": "v"}'`
 (JSON object), `--auto/--escalate` gate overrides (the factory gate's
 question scoping is preserved), `--max-turns`, `--quiet` (banner only),
-`--yes` (auto-approve confirm gates), `--telemetry-out run.jsonl`, and
-`--generator mock|openai|anthropic` with `--generator-model`/`--base-url`
-for the `draft` agent. Exit codes: `0` completed, `1` any other outcome,
-`2` usage error (unknown agent, bad `--fields`, missing LLM key).
+`--yes` (auto-approve confirm gates), `--telemetry-out run.jsonl`,
+`--transcript-out session.log`, and `--generator mock|openai|anthropic`
+with `--generator-model`/`--base-url` for the `draft` agent. Exit codes:
+`0` completed, `1` any other outcome, `2` usage error (unknown agent, bad
+`--fields`, missing LLM key).
 
 **`repl` commands.** Type a task to run it (fresh runner per task, so no
-idempotency/memory bleed across runs). Session commands:
+idempotency/memory bleed across runs). Every agent prints a short guide on
+start/switch (`:guide` reprints it) with example tasks worth trying. Session
+commands:
 
 ```
 :fields {...}  set persistent fields   :agent <name>  switch agent
-:gates <auto> <esc>  retune live       :trace on|off  :help  :quit
+:gates <auto> <esc>  retune live       :trace on|off  :guide
+:retry  rerun last task               :task  multi-line task (end with .)
+:help  :quit
 ```
+
+Tab-completion for commands/agents and persistent history
+(`~/.sokit_history`, override via `SOKIT_HISTORY`) where readline exists.
 
 CONFIRM gates prompt `y/n` on stdin (the `on_confirm` hook); `--yes`
 batch-approves. Colors auto-disable when piped or under `NO_COLOR`.
+
+**More commands.** `doctor` checks the environment (Python version, API
+keys, sqlite3, endpoint reachability, readline); `eval` runs the
+labeled-eval regression gate (`--cases`, `--error-budget`); `show
+<run.jsonl>` re-renders saved telemetry.
+
+```bash
+python3 -m examples.cli doctor
+python3 -m examples.cli eval
+python3 -m examples.cli show run.jsonl
+```
 
 ## Minimal example
 

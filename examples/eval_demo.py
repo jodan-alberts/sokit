@@ -65,8 +65,8 @@ def make_runner():
     )
 
 
-def main() -> int:
-    cases = load_cases(CASES_PATH)
+def main(cases_path: str | None = None, error_budget: float = 0.15) -> int:
+    cases = load_cases(cases_path or CASES_PATH)
     report = run_suite(make_runner, cases)
 
     print(f"cases: {len(cases)}  question-accuracy: {report.accuracy:.2f}  "
@@ -85,8 +85,8 @@ def main() -> int:
     # A 0.15 error budget (not 0.05): the mock's confidences barely
     # discriminate outcomes, so a strict budget degenerates to "act on
     # nothing". The budget itself is a policy choice the table informs.
-    tuning = sweep_thresholds(report.records, error_budget=0.15)
-    print(f"\ntuner (error budget 0.15): best auto={tuning.best_auto} "
+    tuning = sweep_thresholds(report.records, error_budget=error_budget)
+    print(f"\ntuner (error budget {error_budget}): best auto={tuning.best_auto} "
           f"escalate={tuning.best_escalate} coverage={tuning.coverage} "
           f"error_rate={tuning.error_rate}")
     print(f"{'auto':>6} {'esc':>5} {'cover':>6} {'err':>6} {'esc_rate':>8}  n")
